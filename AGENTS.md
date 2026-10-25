@@ -8,6 +8,7 @@ Bei Programmieraufgaben gilt für den Hauptagenten:
 - Nutze bei schwierigen Teilaufgaben gpt-6.1-sol mit high.
 - Prüfe den tatsächlichen Diff, relevanten Code und Testnachweise selbst.
 - Fordere kurze Ergebnisberichte statt vollständiger Arbeitsprotokolle an.
+- Arbeite mit thematisch abgegrenzten Commits; der Hauptagent prüft und erstellt sie.
 
 Für Unteragenten:
 - Bearbeite ausschließlich deine zugewiesene Aufgabe.
