@@ -110,9 +110,13 @@ removal, and the installer requires a real authenticated status reply at the end
   inspection found no extra bands. AppKit startup stays synchronous, while
   asynchronous helper CLI commands pump the main run loop separately.
 
-Administrator-authenticated installation and a successful installed
-`--probe-helper` response still require verification on the host. Physical
-lid-close behavior remains subject to the acceptance matrix below.
+After the user installed the update, the installed app's read-only
+`--probe-helper` completed successfully: `localDaemon`, `reachable: true`,
+launchd state `running` with a live PID, and no connection error. The helper
+reported an ended session with reason `stopped`, no pending restoration error,
+and `safeToUnload: true`. The user also confirmed the app works as expected.
+Physical lid-close behavior remains subject to the acceptance matrix below;
+the connection probe does not establish every hardware acceptance case.
 
 ## Physical acceptance test
 
