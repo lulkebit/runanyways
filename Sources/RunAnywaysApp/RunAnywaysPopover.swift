@@ -33,9 +33,6 @@ struct RunAnywaysPopover: View {
                     .accessibilityLabel("Helper error: \(error)")
             }
 
-            safetyNote
-                .padding(.top, 14)
-
             footer
                 .padding(.top, 12)
         }
@@ -310,23 +307,6 @@ struct RunAnywaysPopover: View {
                 .font(.system(size: 10))
                 .foregroundStyle(.tertiary)
         }
-    }
-
-    private var safetyNote: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            Label("Ventilated desk · stop before packing", systemImage: "wind")
-                .font(.system(size: 10, weight: .medium))
-                .foregroundStyle(.secondary)
-            DisclosureGroup("About lid-close behavior") {
-                Text("Sleep stays disabled while a session is armed or paused. The built-in display still sleeps when you close the lid, and the countdown runs only while it is shut. Normal sleep is restored when you stop or the session ends.")
-                    .font(.system(size: 10))
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(.top, 5)
-            }
-            .font(.system(size: 10, weight: .medium))
-        }
-        .padding(.top, 2)
     }
 
     private var footer: some View {
