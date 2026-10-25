@@ -45,7 +45,8 @@ final class AppModel: ObservableObject {
 
     @Published private(set) var helperStatus: HelperStatusSnapshot?
     @Published private(set) var setupStatus = SMAppService.daemon(plistName: RunAnywaysServiceIdentity.launchDaemonPlistName).status
-    @Published private(set) var lastError: String?
+    @Published private(set) var connectionError: String?
+    @Published private(set) var localDaemonStatus: LocalDaemonStatus?
     @Published private(set) var commandError: String?
     @Published private(set) var serviceActionMessage: String?
     @Published private(set) var isBusy = false
@@ -66,8 +67,19 @@ final class AppModel: ObservableObject {
     private var clockTask: Task<Void, Never>?
     private let helperService = SMAppService.daemon(plistName: RunAnywaysServiceIdentity.launchDaemonPlistName)
     private let helperInspection = HelperSetupDiagnostics.inspect(appURL: Bundle.main.bundleURL)
+    private let installationBackend = try? HelperInstallationBackend.configured(in: Bundle.main.bundleURL)
+    private let backendConfigurationError: String? = {
+        do {
+            _ = try HelperInstallationBackend.configured(in: Bundle.main.bundleURL)
+            return nil
+        } catch {
+            return error.localizedDescription
+        }
+    }()
     private var lastStatusUptime: TimeInterval?
     private var didStart = false
+    private var didAttemptConnection = false
+    private var knownSessionNeedsCleanup = false
     private var sessionActivity: NSObjectProtocol?
     private let installIssue: String? = {
         do {
@@ -89,7 +101,6 @@ final class AppModel: ObservableObject {
     func start() {
         guard !isPreview, !didStart else { return }
         didStart = true
-        refreshSetupStatus()
         Task { await refreshStatus() }
 
         heartbeatTask = Task { [weak self] in
@@ -119,19 +130,93 @@ final class AppModel: ObservableObject {
     }
 
     private var helperSetupDecision: HelperSetupDecision {
-        HelperSetupPolicy.decision(for: helperSetupState, resources: helperInspection.resources)
+        guard let installationBackend,
+              let policyBackend = HelperSetupBackend(rawValue: installationBackend.rawValue) else {
+            return .unavailable
+        }
+        return HelperSetupPolicy.decision(
+            backend: policyBackend,
+            serviceManagementState: helperSetupState,
+            resources: helperInspection.resources,
+            localDaemonPlistInstalled: localDaemonStatus?.plistInstalled ?? false,
+            localDaemonJobLoaded: localDaemonStatus?.jobLoaded ?? false
+        )
     }
 
     var hasRegisteredHelper: Bool { helperSetupDecision == .enabled }
-    var needsHelperApproval: Bool { helperSetupDecision == .requiresApproval }
-    var helperSetupAllowsRegistration: Bool { helperSetupDecision == .register && installIssue == nil }
+    var isLocalDaemonBackend: Bool { installationBackend == .localDaemon }
+    var needsHelperApproval: Bool {
+        installationBackend == .serviceManagement && helperSetupDecision == .requiresApproval
+    }
+    var helperSetupAllowsRegistration: Bool {
+        installationBackend == .serviceManagement && helperSetupDecision == .register && installIssue == nil
+    }
     var canRegisterHelper: Bool {
-        !isPreview && !isBusy && helperSetupAllowsRegistration
+        !isPreview && !isBusy && helperSetupAllowsRegistration && !requiresCleanupBeforeTeardown
     }
     var canQuit: Bool { !isBusy }
     var hasActiveSession: Bool { helperStatus?.session.isActive == true }
     var protectionIsVerified: Bool { helperStatus?.protectionVerified == true }
-    var hasRestoreError: Bool { lastError != nil || helperStatus?.lastErrorMessage != nil }
+    var hasRestoreError: Bool { helperStatus?.lastErrorMessage != nil }
+    var lastError: String? { connectionError }
+    var isConnectionUnavailable: Bool { connectionError != nil }
+    var canRetryConnection: Bool { !isPreview && !isBusy && hasRegisteredHelper && connectionError != nil }
+
+    private var recoveryState: HelperRecoveryState {
+        HelperRecoveryState(
+            isReachable: helperStatus != nil && connectionError == nil,
+            hasKnownActiveSession: knownSessionNeedsCleanup && helperStatus?.session.isActive == true,
+            helperReportsRestorationFailure: helperStatus?.lastErrorMessage != nil
+        )
+    }
+
+    private var requiresCleanupBeforeTeardown: Bool {
+        HelperRecoveryPolicy.requiresCleanupBeforeTeardown(recoveryState)
+    }
+
+    var hasPendingCleanup: Bool { requiresCleanupBeforeTeardown }
+
+    private var launchdConfirmsNoHelperProcess: Bool {
+        guard let status = localDaemonStatus,
+              status.inspectionReliable,
+              !status.processRunning,
+              status.processID == nil else { return false }
+        if status.jobLoaded { return status.lastExitStatus != nil }
+        let detail = (status.detail ?? "").lowercased()
+        return detail.contains("could not find service")
+    }
+
+    private var safeNoSessionEvidence: Bool {
+        if let helperStatus, connectionError == nil {
+            return !helperStatus.session.isActive &&
+                !helperStatus.protectionVerified &&
+                helperStatus.lastErrorMessage == nil
+        }
+        return launchdConfirmsNoHelperProcess
+    }
+
+    var localHelperActionTitle: String {
+        helperSetupDecision == .installLocalDaemon ? "Install local helper" : "Repair helper"
+    }
+
+    var canRetryRestore: Bool {
+        HelperRecoveryPolicy.action(for: recoveryState) == .retryRestore
+    }
+
+    var canRepairHelper: Bool {
+        guard !isPreview, !isBusy, installIssue == nil,
+              HelperRecoveryPolicy.canRepairOrRemoveHelper(recoveryState) else { return false }
+        switch installationBackend {
+        case .localDaemon:
+            if helperSetupDecision == .installLocalDaemon { return true }
+            return (helperSetupDecision == .repairLocalDaemon || helperSetupDecision == .enabled) &&
+                safeNoSessionEvidence
+        case .serviceManagement:
+            return helperSetupDecision == .enabled && connectionError != nil && safeNoSessionEvidence
+        case .none:
+            return false
+        }
+    }
 
     var hasVerifiedProtection: Bool {
         guard hasRegisteredHelper,
@@ -143,7 +228,7 @@ final class AppModel: ObservableObject {
         }
         guard let lastStatusUptime,
               nowUptime - lastStatusUptime <= Self.protectionFreshnessLimit,
-              lastError == nil else {
+              connectionError == nil else {
             return false
         }
         if session.state == .running,
@@ -156,29 +241,33 @@ final class AppModel: ObservableObject {
 
     var canStartSession: Bool {
         !isPreview && !isBusy && installIssue == nil && hasRegisteredHelper && !hasActiveSession &&
-            lastError == nil && helperStatus?.lastErrorMessage == nil &&
+            connectionError == nil && helperStatus?.lastErrorMessage == nil &&
             (selectedLength != .custom || (1...24 * 60).contains(customMinutes)) &&
             (Session.minimumCutoffPercentage...Session.maximumCutoffPercentage).contains(cutoffPercentage)
     }
 
     var canExtendSession: Bool {
         !isPreview && !isBusy && installIssue == nil && hasRegisteredHelper && hasVerifiedProtection &&
-            helperStatus?.session.canExtend == true
+            connectionError == nil && helperStatus?.session.canExtend == true
     }
 
     var canStopSession: Bool {
-        !isPreview && !isBusy && hasRegisteredHelper &&
-            (hasActiveSession || helperStatus?.lastErrorMessage != nil || lastError != nil)
-    }
-
-    var canRetryRestore: Bool {
-        helperStatus?.lastErrorMessage != nil || lastError != nil
+        !isPreview && !isBusy && (hasActiveSession || canRetryRestore)
     }
 
     var canDisableHelper: Bool {
-        !isPreview && !isBusy && installIssue == nil && hasRegisteredHelper && !hasActiveSession &&
-            !protectionIsVerified && helperStatus != nil &&
-            helperStatus?.lastErrorMessage == nil && lastError == nil
+        guard !isPreview, !isBusy, installIssue == nil,
+              HelperRecoveryPolicy.canRepairOrRemoveHelper(recoveryState) else { return false }
+        switch installationBackend {
+        case .localDaemon:
+            let backendPresent = localDaemonStatus?.plistInstalled == true ||
+                helperService.status == .enabled || helperService.status == .requiresApproval
+            return backendPresent && safeNoSessionEvidence
+        case .serviceManagement:
+            return (setupStatus == .enabled || setupStatus == .requiresApproval) && safeNoSessionEvidence
+        case .none:
+            return false
+        }
     }
 
     var displayedRemainingSeconds: TimeInterval? {
@@ -232,8 +321,12 @@ final class AppModel: ObservableObject {
 
     var mainStatusTitle: String {
         if isPreview { return "Preview" }
+        if connectionError != nil {
+            return knownSessionNeedsCleanup ? "Session connection lost" : "Background helper unavailable"
+        }
         guard let snapshot = helperStatus else {
-            return hasRegisteredHelper ? "Connecting to helper…" : "Helper setup needed"
+            if hasRegisteredHelper && !didAttemptConnection { return "Connecting to helper…" }
+            return "Helper setup needed"
         }
         if snapshot.lastErrorMessage != nil { return "Sleep restore needs attention" }
         let session = snapshot.session
@@ -263,12 +356,18 @@ final class AppModel: ObservableObject {
 
     var mainStatusDetail: String {
         if isPreview { return "This preview does not contact or enable the helper." }
+        if let connectionError {
+            if knownSessionNeedsCleanup {
+                return "The helper became unreachable during a session. Its last known state is retained; reconnect and stop to confirm normal sleep is restored. \(connectionError)"
+            }
+            return "The background helper is installed but unavailable. Retry the read-only connection check or repair the helper. \(connectionError)"
+        }
         if let installIssue, !hasRegisteredHelper { return installIssue }
         guard let snapshot = helperStatus else {
             if needsHelperApproval { return "Approve RunAnyways in System Settings to continue." }
             if canRegisterHelper { return "Enable the background helper to use lid-close protection." }
             if let helperSetupMessage { return helperSetupMessage }
-            return lastError ?? "Waiting for the background helper to respond."
+            return connectionError ?? "Waiting for the background helper to respond."
         }
         let session = snapshot.session
         if let helperError = snapshot.lastErrorMessage {
@@ -298,7 +397,7 @@ final class AppModel: ObservableObject {
             }
             return "Normal sleep restored."
         case .failed:
-            return session.failureMessage ?? snapshot.lastErrorMessage ?? lastError ?? "The helper stopped protection."
+            return session.failureMessage ?? snapshot.lastErrorMessage ?? connectionError ?? "The helper stopped protection."
         case .idle:
             return "Choose a duration, then close the lid to start the countdown."
         }
@@ -328,17 +427,44 @@ final class AppModel: ObservableObject {
 
     var helperSetupDescription: String {
         if installIssue != nil { return "Install in /Applications first" }
+        if connectionError != nil && !knownSessionNeedsCleanup { return "Background helper unavailable" }
+        if installationBackend == .localDaemon {
+            switch helperSetupDecision {
+            case .enabled: return "Local background helper installed"
+            case .installLocalDaemon: return "Local background helper not installed"
+            case .repairLocalDaemon: return "Local background helper needs repair"
+            case .unavailable: return "Helper resources need repair"
+            case .requiresApproval, .register, .unknown: return "Local helper setup unavailable"
+            }
+        }
         switch helperSetupDecision {
         case .enabled: return "Background helper enabled"
         case .requiresApproval: return "Approval required in System Settings"
         case .register: return "Background helper not enabled"
+        case .installLocalDaemon, .repairLocalDaemon: return "Local helper setup unavailable"
         case .unavailable: return "Helper resources need repair"
         case .unknown: return "Helper status unavailable"
         }
     }
 
     var helperSetupMessage: String? {
+        if let backendConfigurationError { return backendConfigurationError }
         if let installIssue { return installIssue }
+        if connectionError != nil && !knownSessionNeedsCleanup { return connectionError }
+        if installationBackend == .localDaemon {
+            switch helperSetupDecision {
+            case .installLocalDaemon:
+                return "Install the local background helper to enable lid-close sessions."
+            case .repairLocalDaemon:
+                return localDaemonStatus?.detail ?? "The local helper is not loaded. Repair it to continue."
+            case .unavailable:
+                return helperInspection.detailMessage ?? "The embedded helper resources are missing or invalid. Rebuild and install RunAnyways again."
+            case .enabled:
+                return localDaemonStatus?.detail
+            case .requiresApproval, .register, .unknown:
+                return "The local helper installation state could not be determined."
+            }
+        }
         switch helperSetupDecision {
         case .requiresApproval:
             return "Approve RunAnyways in System Settings to continue."
@@ -348,7 +474,7 @@ final class AppModel: ObservableObject {
                 : "Enable the background helper to use lid-close protection."
         case .unavailable:
             return helperInspection.detailMessage ?? "The helper executable or LaunchDaemon plist is missing or invalid. Rebuild and install RunAnyways again."
-        case .enabled, .unknown:
+        case .enabled, .installLocalDaemon, .repairLocalDaemon, .unknown:
             return nil
         }
     }
@@ -357,36 +483,96 @@ final class AppModel: ObservableObject {
 
     func registerHelper() {
         guard canRegisterHelper, beginMutation() else { return }
-        defer { isBusy = false }
-        lastError = nil
-        commandError = nil
-        serviceActionMessage = nil
-        do {
-            try helperService.register()
-            refreshSetupStatus()
-            switch helperSetupDecision {
-            case .requiresApproval:
-                serviceActionMessage = "macOS registered the helper. Approve it in System Settings before starting a session."
-            case .enabled:
-                serviceActionMessage = "Helper enabled. Waiting for its verified status…"
-                Task { await refreshStatus() }
-            case .register:
-                serviceActionMessage = "macOS returned from registration but still reports no registered service. Use the read-only helper diagnostics from Terminal for details."
-            case .unavailable:
-                serviceActionMessage = helperInspection.detailMessage ?? "The embedded helper resources are not valid. Rebuild and install RunAnyways again."
-            case .unknown:
-                serviceActionMessage = "macOS returned an unrecognized helper status. Use the read-only helper diagnostics from Terminal for details."
+        Task {
+            defer { isBusy = false }
+            connectionError = nil
+            commandError = nil
+            serviceActionMessage = nil
+            do {
+                try helperService.register()
+                await refreshSetupStatus()
+                switch helperSetupDecision {
+                case .requiresApproval:
+                    serviceActionMessage = "macOS registered the helper. Approve it in System Settings before starting a session."
+                case .enabled:
+                    serviceActionMessage = "Helper enabled. Waiting for its verified status…"
+                    await refreshStatus()
+                case .register:
+                    serviceActionMessage = "macOS returned from registration but still reports no registered service. Use the read-only helper diagnostics from Terminal for details."
+                case .unavailable:
+                    serviceActionMessage = helperInspection.detailMessage ?? "The embedded helper resources are not valid. Rebuild and install RunAnyways again."
+                case .installLocalDaemon, .repairLocalDaemon:
+                    serviceActionMessage = "This build uses the local LaunchDaemon installation path."
+                case .unknown:
+                    serviceActionMessage = "macOS returned an unrecognized helper status. Use the read-only helper diagnostics from Terminal for details."
+                }
+            } catch {
+                await refreshSetupStatus()
+                if helperSetupDecision == .requiresApproval {
+                    serviceActionMessage = "macOS requires approval for RunAnyways. Approve the background helper in System Settings before starting a session."
+                } else if helperSetupDecision == .enabled {
+                    serviceActionMessage = "macOS reports the helper enabled. Checking its authenticated status…"
+                    await refreshStatus()
+                } else {
+                    serviceActionMessage = registrationErrorMessage(error)
+                }
             }
-        } catch {
-            refreshSetupStatus()
-            let nsError = error as NSError
-            var detail = "\(nsError.domain) (\(nsError.code)): \(nsError.localizedDescription)"
-            if let reason = nsError.localizedFailureReason { detail += " \(reason)" }
-            if let suggestion = nsError.localizedRecoverySuggestion { detail += " \(suggestion)" }
-            if setupStatus == .requiresApproval {
-                serviceActionMessage = "macOS requires approval before the helper can run. \(detail)"
-            } else {
-                serviceActionMessage = "macOS did not register the helper. \(detail)"
+        }
+    }
+
+    func repairHelper() {
+        guard canRepairHelper, beginMutation() else { return }
+        Task {
+            defer { isBusy = false }
+            serviceActionMessage = nil
+            commandError = nil
+            do {
+                switch installationBackend {
+                case .localDaemon:
+                    try await removeManagedRegistrationForMigration()
+                    try await LocalDaemonManager.perform(.install)
+                    await refreshSetupStatus()
+                    serviceActionMessage = "The local helper installer completed. Checking the helper connection…"
+                    await refreshStatus()
+                case .serviceManagement:
+                    guard helperService.status == .enabled || helperService.status == .requiresApproval else {
+                        try helperService.register()
+                        await refreshSetupStatus()
+                        await refreshStatus()
+                        return
+                    }
+                    try await helperService.unregister()
+                    let removed = await waitForManagedUnregistration()
+                    guard removed else { throw HelperAppActionError.registrationDidNotChange }
+                    try helperService.register()
+                    await refreshSetupStatus()
+                    serviceActionMessage = "The managed helper registration was repaired. Checking the helper connection…"
+                    await refreshStatus()
+                case .none:
+                    throw HelperAppActionError.backendUnavailable(backendConfigurationError ?? "Helper installation mode is unavailable.")
+                }
+            } catch {
+                await refreshSetupStatus()
+                if helperSetupDecision == .requiresApproval {
+                    serviceActionMessage = "macOS requires approval for RunAnyways. Approve the background helper in System Settings before starting a session."
+                } else {
+                    serviceActionMessage = registrationErrorMessage(error)
+                }
+            }
+        }
+    }
+
+    func retryConnection() {
+        guard canRetryConnection, beginMutation() else { return }
+        Task {
+            defer { isBusy = false }
+            didAttemptConnection = true
+            do {
+                accept(try await helperClient().fetchStatus())
+                commandError = nil
+                serviceActionMessage = nil
+            } catch {
+                await handleAsyncError(error)
             }
         }
     }
@@ -399,24 +585,48 @@ final class AppModel: ObservableObject {
         guard canDisableHelper, beginMutation() else { return }
         Task {
             defer { isBusy = false }
-            do {
-                let restoredStatus = try await helperClient().stopSession()
-                accept(restoredStatus)
-                guard !restoredStatus.session.isActive,
-                      !restoredStatus.protectionVerified,
-                      restoredStatus.lastErrorMessage == nil else {
-                    lastError = "The helper has not confirmed that normal sleep is restored."
+            if requiresCleanupBeforeTeardown {
+                do {
+                    let restoredStatus = try await helperClient().stopSession()
+                    accept(restoredStatus)
+                    guard !restoredStatus.session.isActive,
+                          !restoredStatus.protectionVerified,
+                          restoredStatus.lastErrorMessage == nil else {
+                        serviceActionMessage = "The helper has not confirmed that normal sleep is restored."
+                        return
+                    }
+                } catch {
+                    await handleAsyncError(error)
                     return
                 }
-                try await helperService.unregister()
-                refreshSetupStatus()
+            }
+
+            do {
+                switch installationBackend {
+                case .localDaemon:
+                    try await removeManagedRegistrationForMigration()
+                    if localDaemonStatus?.plistInstalled == true || localDaemonStatus?.jobLoaded == true {
+                        try await LocalDaemonManager.perform(.remove)
+                    }
+                case .serviceManagement:
+                    try await helperService.unregister()
+                    guard await waitForManagedUnregistration() else {
+                        throw HelperAppActionError.registrationDidNotChange
+                    }
+                case .none:
+                    throw HelperAppActionError.backendUnavailable(backendConfigurationError ?? "Helper installation mode is unavailable.")
+                }
+
+                await refreshSetupStatus()
                 helperStatus = nil
                 lastStatusUptime = nil
+                knownSessionNeedsCleanup = false
+                connectionError = nil
                 serviceActionMessage = "Background helper disabled."
-                lastError = nil
                 commandError = nil
             } catch {
-                await handleAsyncError(error)
+                serviceActionMessage = registrationErrorMessage(error)
+                await refreshSetupStatus()
             }
         }
     }
@@ -427,7 +637,7 @@ final class AppModel: ObservableObject {
             NSApp.terminate(nil)
             return
         }
-        guard hasActiveSession || canRetryRestore else {
+        guard requiresCleanupBeforeTeardown else {
             NSApp.terminate(nil)
             return
         }
@@ -440,7 +650,7 @@ final class AppModel: ObservableObject {
                 guard !restoredStatus.session.isActive,
                       !restoredStatus.protectionVerified,
                       restoredStatus.lastErrorMessage == nil else {
-                    lastError = "Normal sleep was not confirmed; RunAnyways is staying open so you can retry."
+                    serviceActionMessage = "Normal sleep was not confirmed; RunAnyways is staying open so you can retry."
                     return
                 }
                 NSApp.terminate(nil)
@@ -458,7 +668,7 @@ final class AppModel: ObservableObject {
             defer { isBusy = false }
             do {
                 accept(try await helperClient().startSession(seconds: seconds, cutoffPercentage: cutoffPercentage))
-                lastError = nil
+                connectionError = nil
                 commandError = nil
                 serviceActionMessage = nil
             } catch {
@@ -473,7 +683,7 @@ final class AppModel: ObservableObject {
             defer { isBusy = false }
             do {
                 accept(try await helperClient().extendSession(seconds: 15 * 60))
-                lastError = nil
+                connectionError = nil
                 commandError = nil
             } catch {
                 await handleAsyncError(error)
@@ -487,7 +697,7 @@ final class AppModel: ObservableObject {
             defer { isBusy = false }
             do {
                 accept(try await helperClient().stopSession())
-                lastError = nil
+                connectionError = nil
                 commandError = nil
             } catch {
                 await handleAsyncError(error)
@@ -495,21 +705,30 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func refreshSetupStatus() {
+    private func refreshSetupStatus() async {
         setupStatus = helperService.status
+        if installationBackend == .localDaemon || connectionError != nil {
+            localDaemonStatus = await Task.detached(priority: .utility) {
+                LocalDaemonManager.inspect()
+            }.value
+        }
         guard hasRegisteredHelper else {
-            client?.invalidate()
-            client = nil
-            helperStatus = nil
-            lastStatusUptime = nil
-            endSessionActivity()
+            if !knownSessionNeedsCleanup {
+                client?.invalidate()
+                client = nil
+                helperStatus = nil
+                lastStatusUptime = nil
+                connectionError = nil
+                endSessionActivity()
+            }
             return
         }
     }
 
     private func refreshStatus() async {
-        refreshSetupStatus()
+        await refreshSetupStatus()
         guard hasRegisteredHelper else { return }
+        didAttemptConnection = true
         do {
             let status: HelperStatusSnapshot
             if helperStatus?.session.isActive == true {
@@ -518,13 +737,13 @@ final class AppModel: ObservableObject {
                 status = try await helperClient().fetchStatus()
             }
             accept(status)
-            lastError = nil
+            connectionError = nil
         } catch {
             if case RunAnywaysIPCError.helper(let message) = error {
                 do {
                     let status = try await helperClient().fetchStatus()
                     accept(status)
-                    lastError = nil
+                    connectionError = nil
                     commandError = status.session.isActive ? message : nil
                 } catch {
                     handleTransportError(error)
@@ -545,6 +764,8 @@ final class AppModel: ObservableObject {
     private func accept(_ status: HelperStatusSnapshot) {
         helperStatus = status
         lastStatusUptime = ProcessInfo.processInfo.systemUptime
+        connectionError = nil
+        knownSessionNeedsCleanup = status.session.isActive || status.lastErrorMessage != nil
         if status.session.isActive {
             beginSessionActivity()
         } else {
@@ -552,16 +773,14 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func show(_ error: Error) {
-        handleTransportError(error)
-    }
-
     private func handleTransportError(_ error: Error) {
-        lastError = error.localizedDescription
+        connectionError = error.localizedDescription
         commandError = nil
+        if helperStatus?.session.isActive == true || helperStatus?.lastErrorMessage != nil {
+            knownSessionNeedsCleanup = true
+        }
         client?.invalidate()
         client = nil
-        helperStatus = nil
         lastStatusUptime = nil
         endSessionActivity()
     }
@@ -572,13 +791,73 @@ final class AppModel: ObservableObject {
             do {
                 let status = try await helperClient().fetchStatus()
                 accept(status)
-                lastError = nil
+                connectionError = nil
             } catch {
                 handleTransportError(error)
             }
             return
         }
         handleTransportError(error)
+    }
+
+    private func registrationErrorMessage(_ error: Error) -> String {
+        let nsError = error as NSError
+        var detail = "\(nsError.domain) (\(nsError.code)): \(nsError.localizedDescription)"
+        if let debugDescription = nsError.userInfo[NSDebugDescriptionErrorKey] as? String {
+            detail += " \(debugDescription)"
+        }
+        if let reason = nsError.localizedFailureReason { detail += " \(reason)" }
+        if let suggestion = nsError.localizedRecoverySuggestion { detail += " \(suggestion)" }
+        return detail
+    }
+
+    private func removeManagedRegistrationForMigration() async throws {
+        guard helperService.status == .enabled || helperService.status == .requiresApproval else { return }
+        guard !requiresCleanupBeforeTeardown else {
+            throw HelperAppActionError.unsafeMigration("An active session or pending sleep restoration must be resolved first.")
+        }
+
+        let hasAuthenticatedIdleStatus: Bool
+        if let helperStatus, connectionError == nil {
+            hasAuthenticatedIdleStatus = !helperStatus.session.isActive &&
+                !helperStatus.protectionVerified &&
+                helperStatus.lastErrorMessage == nil
+        } else {
+            hasAuthenticatedIdleStatus = false
+        }
+        let localStatus: LocalDaemonStatus
+        if let localDaemonStatus {
+            localStatus = localDaemonStatus
+        } else {
+            localStatus = await Task.detached(priority: .utility) {
+                LocalDaemonManager.inspect()
+            }.value
+        }
+        let confirmsStopped = localStatus.inspectionReliable &&
+            !localStatus.processRunning &&
+            localStatus.processID == nil &&
+            (localStatus.jobLoaded ? localStatus.lastExitStatus != nil :
+                (localStatus.detail ?? "").localizedCaseInsensitiveContains("Could not find service"))
+        guard hasAuthenticatedIdleStatus || confirmsStopped else {
+            throw HelperAppActionError.unsafeMigration(
+                "The old managed helper is unreachable and launchd cannot confirm that its process stopped."
+            )
+        }
+
+        try await helperService.unregister()
+        guard await waitForManagedUnregistration() else {
+            throw HelperAppActionError.registrationDidNotChange
+        }
+    }
+
+    private func waitForManagedUnregistration() async -> Bool {
+        let deadline = ProcessInfo.processInfo.systemUptime + 5
+        while ProcessInfo.processInfo.systemUptime < deadline {
+            let status = helperService.status
+            if status == .notRegistered || status == .notFound { return true }
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+        return helperService.status == .notRegistered || helperService.status == .notFound
     }
 
     private func beginMutation() -> Bool {
@@ -609,5 +888,22 @@ final class AppModel: ObservableObject {
         let seconds = total % 60
         if hours > 0 { return String(format: "%d:%02d:%02d", hours, minutes, seconds) }
         return String(format: "%02d:%02d", minutes, seconds)
+    }
+}
+
+private enum HelperAppActionError: LocalizedError {
+    case registrationDidNotChange
+    case unsafeMigration(String)
+    case backendUnavailable(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .registrationDidNotChange:
+            "Service Management did not confirm that the old helper registration was removed."
+        case .unsafeMigration(let detail):
+            detail
+        case .backendUnavailable(let detail):
+            detail
+        }
     }
 }

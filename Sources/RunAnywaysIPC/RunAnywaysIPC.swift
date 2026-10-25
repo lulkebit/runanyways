@@ -118,6 +118,7 @@ public enum RunAnywaysPeerTrust {
     ) throws -> String {
         let appURL = enclosingAppURL.standardizedFileURL.resolvingSymlinksInPath()
         try validateProtectedAppLocation(appURL)
+        _ = try HelperInstallationBackend.configured(in: appURL)
         let appInfo = try signingInformation(at: appURL)
         let appTeam = (Bundle(url: appURL)?.infoDictionary?[teamInfoKey] as? String)
             .flatMap { $0.isEmpty ? nil : $0 }
@@ -316,7 +317,9 @@ public final class RunAnywaysHelperClient: @unchecked Sendable {
                 continuation.resume(with: result)
             }
             let proxy = connection.remoteObjectProxyWithErrorHandler { error in
-                complete(.failure(RunAnywaysIPCError.xpc(error.localizedDescription)))
+                // Preserve NSCocoaErrorDomain/code and debugDescription so the
+                // installed diagnostic CLI can distinguish launch/auth failures.
+                complete(.failure(error))
             }
             guard let helper = proxy as? RunAnywaysHelperProtocol else {
                 complete(.failure(RunAnywaysIPCError.xpc("The helper connection is unavailable.")))

@@ -77,12 +77,50 @@ command-line launch may use an owned preview anchor window; geometry records tha
 fallback explicitly. Require `anchor: statusItem` when checking actual menu-bar
 anchoring. Preview mode keeps session controls disabled.
 
+## Local helper launch fix — 2026-10-25
+
+The installed ad-hoc Service Management job was loaded but had no PID and exited
+with `78: EX_CONFIG`. Host logs recorded an AMFI launch-constraint violation for
+an ad-hoc/unknown-chain signature; the helper never reached its entry point.
+On-disk signature validity and `SMAppService.status == enabled` did not prove
+that macOS could launch it.
+
+Local builds now use an administrator-installed LaunchDaemon and a protected
+executable in `/Library/PrivilegedHelperTools`. Signed distribution builds retain
+Service Management. Migration unregisters only RunAnyways' old managed service
+from the installed app's user context. A recovery journal blocks replacement or
+removal, and the installer requires a real authenticated status reply at the end.
+
+- Full suite: 51 tests passed (23 coordinator, 8 installation, 11 setup/recovery,
+  9 session). Tests do not install daemons or change host power settings.
+- Universal release compilation, strict all-architecture signature checks, both
+  daemon plists, shell syntax, and `git diff --check` passed.
+- Conflicting helper CLI commands returned exit code 2 with registration and
+  unregistration both unattempted. Running the helper as a normal user returned
+  its expected root-only error before creating any session or journal.
+- Initial connection failure offers a read-only retry; pending restoration or a
+  previously active session retains cleanup requirements. These are separate
+  policy cases covered by regression tests.
+- Harmless descriptor probes confirmed that the administrator launcher rejects
+  user-owned scripts and that Bash continues reading the pinned script when its
+  source pathname is replaced or its descriptor is reused later.
+- The final packaged Universal app rendered both native light/dark previews
+  through LaunchServices and exited. Geometry remained `anchor: statusItem`,
+  340 × 378 pt content, 366 × 404 pt full frame, and zero hosting insets; visual
+  inspection found no extra bands. AppKit startup stays synchronous, while
+  asynchronous helper CLI commands pump the main run loop separately.
+
+Administrator-authenticated installation and a successful installed
+`--probe-helper` response still require verification on the host. Physical
+lid-close behavior remains subject to the acceptance matrix below.
+
 ## Physical acceptance test
 
 Use a hard, ventilated surface, save your work, and start with sufficient battery.
 Use `scripts/install-local.sh` to install the protected local build in
-`/Applications/RunAnyways.app`, open it, and explicitly enable
-its helper through the in-app setup and macOS background-item approval. Keep other
+`/Applications/RunAnyways.app` and install its local helper, then open it. Signed
+distributions instead enable the helper through the in-app setup and macOS
+background-item approval. Keep other
 sleep-management utilities stopped during the test.
 
 | Case | Expected result |

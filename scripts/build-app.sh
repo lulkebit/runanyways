@@ -117,14 +117,20 @@ else
 fi
 
 if [ -n "$signing_team" ]; then
-    sed "s/__RUNANYWAYS_SIGNING_TEAM_ID__/$signing_team/" \
+    sed -e "s/__RUNANYWAYS_SIGNING_TEAM_ID__/$signing_team/" \
+        -e 's/__RUNANYWAYS_HELPER_INSTALLATION_MODE__/serviceManagement/' \
         "$repo_root/Resources/Info.plist.template" > "$staging_app/Contents/Info.plist"
 else
-    sed 's/__RUNANYWAYS_SIGNING_TEAM_ID__//' \
+    sed -e 's/__RUNANYWAYS_SIGNING_TEAM_ID__//' \
+        -e 's/__RUNANYWAYS_HELPER_INSTALLATION_MODE__/localDaemon/' \
         "$repo_root/Resources/Info.plist.template" > "$staging_app/Contents/Info.plist"
 fi
 cp "$repo_root/Resources/com.runanyways.RunAnywaysHelper.plist" \
     "$staging_app/Contents/Library/LaunchDaemons/com.runanyways.RunAnywaysHelper.plist"
+cp "$repo_root/Resources/com.runanyways.RunAnywaysHelper.local.plist" \
+    "$staging_app/Contents/Library/LaunchDaemons/com.runanyways.RunAnywaysHelper.local.plist"
+cp "$repo_root/scripts/manage-helper.sh" "$staging_app/Contents/Resources/manage-helper.sh"
+chmod 755 "$staging_app/Contents/Resources/manage-helper.sh"
 
 if [ -n "$signing_identity" ]; then
     codesign --force --sign "$signing_identity" \
@@ -149,6 +155,7 @@ fi
 
 plutil -lint "$staging_app/Contents/Info.plist"
 plutil -lint "$staging_app/Contents/Library/LaunchDaemons/com.runanyways.RunAnywaysHelper.plist"
+plutil -lint "$staging_app/Contents/Library/LaunchDaemons/com.runanyways.RunAnywaysHelper.local.plist"
 codesign --verify --strict --deep "$staging_app"
 
 if [ -e "$output_app" ] || [ -L "$output_app" ]; then
@@ -169,5 +176,5 @@ if [ -n "$signing_identity" ]; then
     printf 'Built signed %s app: %s\n' "$configuration" "$output_app"
 else
     printf 'Built ad-hoc signed %s development app: %s\n' "$configuration" "$output_app"
-    printf 'Before enabling the privileged helper, run scripts/install-local.sh, then register the helper from the app.\n'
+    printf 'Install the app and its local daemon with scripts/install-local.sh (administrator authorization required).\n'
 fi

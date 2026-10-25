@@ -24,6 +24,8 @@
 	<true/>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
+	<key>RunAnywaysHelperInstallationMode</key>
+	<string>__RUNANYWAYS_HELPER_INSTALLATION_MODE__</string>
 	<key>RunAnywaysSigningTeamID</key>
 	<string>__RUNANYWAYS_SIGNING_TEAM_ID__</string>
 </dict>

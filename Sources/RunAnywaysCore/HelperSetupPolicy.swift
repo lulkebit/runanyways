@@ -33,8 +33,15 @@ public enum HelperSetupDecision: String, Codable, Equatable, Sendable {
     case enabled
     case requiresApproval
     case register
+    case installLocalDaemon
+    case repairLocalDaemon
     case unavailable
     case unknown
+}
+
+public enum HelperSetupBackend: String, Codable, Equatable, Sendable {
+    case serviceManagement
+    case localDaemon
 }
 
 public enum HelperSetupPolicy {
@@ -49,5 +56,58 @@ public enum HelperSetupPolicy {
         case .notRegistered, .notFound: .register
         case .unknown: .unknown
         }
+    }
+
+    public static func decision(
+        backend: HelperSetupBackend,
+        serviceManagementState: HelperSetupState,
+        resources: HelperSetupResources,
+        localDaemonPlistInstalled: Bool = false,
+        localDaemonJobLoaded: Bool = false
+    ) -> HelperSetupDecision {
+        guard resources.areUsable else { return .unavailable }
+        guard backend == .localDaemon else {
+            return decision(for: serviceManagementState, resources: resources)
+        }
+        if localDaemonJobLoaded && localDaemonPlistInstalled { return .enabled }
+        return localDaemonPlistInstalled ? .repairLocalDaemon : .installLocalDaemon
+    }
+}
+
+public struct HelperRecoveryState: Codable, Equatable, Sendable {
+    public let isReachable: Bool
+    public let hasKnownActiveSession: Bool
+    public let helperReportsRestorationFailure: Bool
+
+    public init(
+        isReachable: Bool,
+        hasKnownActiveSession: Bool,
+        helperReportsRestorationFailure: Bool
+    ) {
+        self.isReachable = isReachable
+        self.hasKnownActiveSession = hasKnownActiveSession
+        self.helperReportsRestorationFailure = helperReportsRestorationFailure
+    }
+}
+
+public enum HelperRecoveryAction: String, Codable, Equatable, Sendable {
+    case none
+    case retryConnection
+    case retryRestore
+}
+
+public enum HelperRecoveryPolicy {
+    public static func action(for state: HelperRecoveryState) -> HelperRecoveryAction {
+        if state.helperReportsRestorationFailure { return .retryRestore }
+        guard !state.isReachable else { return .none }
+        return state.hasKnownActiveSession ? .retryRestore : .retryConnection
+    }
+
+    public static func requiresCleanupBeforeTeardown(_ state: HelperRecoveryState) -> Bool {
+        state.hasKnownActiveSession || state.helperReportsRestorationFailure
+    }
+
+    public static func canRepairOrRemoveHelper(_ state: HelperRecoveryState) -> Bool {
+        !requiresCleanupBeforeTeardown(state)
     }
 }

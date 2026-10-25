@@ -33,7 +33,7 @@ overridden. Session expiration restores normal sleep policy, not forced sleep.
 ## Power and lifetime
 
 Closed-lid operation needs more than idle-sleep assertions. Use a narrow root
-LaunchDaemon managed by SMAppService. The helper may invoke only hardcoded pmset
+LaunchDaemon. The helper may invoke only hardcoded pmset
 commands through Process (no shell, no caller-supplied paths/arguments). Capture and
 verify SleepDisabled before acquisition. Refuse to take ownership if another tool
 already disabled sleep. Journal ownership before mutation in a root-only location;
@@ -59,6 +59,31 @@ never trust just bundle identifier or PID. Signed distributions pin a signing te
 local ad-hoc builds must use an explicitly documented, constrained development
 trust path. No arbitrary execution API. The GUI handles setup approvals and helper
 unavailability honestly. Timer and heartbeat continue with the popover closed.
+
+## Helper installation
+
+Build metadata explicitly selects `localDaemon` for constrained ad-hoc builds or
+`serviceManagement` for a configured Apple signing team. Local builds install a
+root-owned plist at `/Library/LaunchDaemons` with one absolute, fixed helper path
+under `/Library/PrivilegedHelperTools`. The embedded executable remains the code
+signature reference for the installed copy. The administrator authorizes a sealed,
+fixed-action management script; it cannot
+take caller-supplied service names, executable paths, or shell commands. Signed,
+notarized distributions use SMAppService instead. Both mechanisms expose the same
+authenticated XPC interface and the same session/recovery coordinator.
+
+The administrator launcher opens the script and validates its root-owned,
+non-writable file descriptor before execution. Installation copies an opened,
+protected helper inode into root-only staging and verifies its code signature.
+The daemon launch definition is literal and fixed. These checks account for
+`/Applications` allowing administrator accounts to replace app directory entries.
+
+Migration removes only RunAnyways' old managed registration in the user context,
+then installs the local daemon with root authorization. Do not unload a known
+active session or pending recovery to repair a connection. Missing or unreachable
+helper state is distinct from an authenticated report of a restoration error.
+Read-only `--probe-helper` proves connectivity and reports whether unloading is
+safe; a registered/loaded service alone is not proof that its process started.
 
 ## Verification
 

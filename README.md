@@ -47,32 +47,37 @@ The resulting app is at `dist/RunAnyways.app`. Install the local build using:
 open /Applications/RunAnyways.app
 ```
 
-The installer requests administrator access to copy the app to the fixed
-`/Applications/RunAnyways.app` location with protected ownership. Merely dragging a
-development build into Applications may retain user-writable ownership and will
-not satisfy the helper's trust checks. The script does not enable the daemon.
-Launch the installed app and follow its helper setup; macOS may also require
-background-service approval in System Settings. Until the helper is available,
-the app must not report active protection.
+The installer requests administrator access to install the protected app at
+`/Applications/RunAnyways.app`, the local helper executable in
+`/Library/PrivilegedHelperTools`, and its LaunchDaemon in `/Library/LaunchDaemons`.
+Local ad-hoc builds use this conventional administrator-installed service because
+macOS can reject them under Service Management's launch constraints. The installer
+migrates RunAnyways' old managed registration; it does not reset other background
+items or change system security settings. Dragging a development build into
+Applications does not perform this setup.
 
-Choose **Enable background helper** in RunAnyways first. That registers the
-embedded service; then choose **Open System Settings** if macOS requests approval.
-The service is not added with the `+` button for ordinary login applications.
-On first use, macOS may report `notFound` for a service it has never registered;
-this does not by itself mean the embedded helper is missing.
+The app also offers local helper installation or repair with administrator
+authentication. Until an authenticated helper replies, the app does not report
+active protection. **Retry connection** requests status only; sleep restoration is
+offered for an actual pending restoration or a previously active session.
 
-If setup fails, the app reports the registration error's domain, code, and reason.
-For a read-only diagnostic report, run:
+For an Apple-signed, notarized distribution, helper registration instead uses
+`SMAppService`: choose **Enable background helper**, then approve it through
+**Open System Settings** if requested. The service is not added with the `+` button
+for ordinary login applications. A first-use `notFound` status alone does not mean
+the embedded helper is missing.
+
+For read-only configuration and authenticated connection diagnostics, run:
 
 ```sh
 /Applications/RunAnyways.app/Contents/MacOS/RunAnyways --helper-status
+/Applications/RunAnyways.app/Contents/MacOS/RunAnyways --probe-helper
 ```
 
-The explicit `--register-helper` command attempts registration without starting a
-keep-awake session. Both commands return setup details as JSON. Registration still
-requires normal macOS approval. Locally ad-hoc-signed builds may be rejected by
-Service Management; validating their on-disk signature does not guarantee service
-registration. Public distribution requires proper Apple signing and notarization.
+These return JSON and never start or stop a keep-awake session. A configured or
+loaded service is distinct from a running process and a successful XPC reply.
+The explicit `--unregister-managed-helper` command is used by the installer to
+remove RunAnyways' old Service Management registration in the user context.
 
 Build an optimized version or a universal app:
 
@@ -82,15 +87,16 @@ Build an optimized version or a universal app:
 ```
 
 Opening `Package.swift` in Xcode is useful for editing and tests. Launch the built
-app bundle for actual use: `swift run` does not create the Service Management
-bundle layout. The build script defaults to local ad-hoc signing. Both IPC peers
+app bundle for actual use: `swift run` does not create the required helper and
+resource bundle layout. The build script defaults to local ad-hoc signing. Both IPC peers
 validate the protected installed app and require the actual companion code
 signature. A local build is not an Apple-notarized public release.
 
 For public distribution, set `CODE_SIGN_IDENTITY` to your Developer ID signing
 identity and `DEVELOPMENT_TEAM` to its ten-character team ID, then notarize and
-staple the application using your own Apple Developer account. Never commit signing certificates or notarization
-credentials. The repository does not include a signing identity or publish a
+staple the application using your own Apple Developer account. The build selects
+Service Management only for the configured signing team. Never commit signing
+certificates or notarization credentials. The repository does not include a signing identity or publish a
 GitHub release automatically.
 
 ## Why a privileged helper?
@@ -99,8 +105,9 @@ Apple's public idle-sleep assertion permits sleep on lid close. Keeping a MacBoo
 running while closed therefore needs a separate sleep override, rather than just
 running `caffeinate`.
 
-RunAnyways uses a small LaunchDaemon, registered through `SMAppService`, with a
-fixed session API. The helper owns session timing, checks power state, and accepts
+RunAnyways uses a small root LaunchDaemon with a fixed session API. Local builds
+install it with administrator authorization; signed distributions register it
+through `SMAppService`. The helper owns session timing, checks power state, and accepts
 no arbitrary commands, executable paths, or shell scripts from the app. It applies
 the system-wide `pmset disablesleep` override and restores its owned state when a
 session ends. Another utility's pre-existing override blocks session start.

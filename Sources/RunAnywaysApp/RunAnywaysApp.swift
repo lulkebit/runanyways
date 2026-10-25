@@ -17,19 +17,29 @@ private enum RunAnywaysLauncher {
             FileHandle.standardError.write(Data("\(error.localizedDescription)\n".utf8))
             exit(2)
         }
-        if renderDirectory != nil &&
-            (arguments.contains("--helper-status") || arguments.contains("--register-helper")) {
-            FileHandle.standardError.write(Data("--render-preview cannot be combined with helper status or registration commands.\n".utf8))
+        let helperCommands = [
+            "--helper-status", "--register-helper", "--probe-helper", "--unregister-managed-helper"
+        ]
+        if renderDirectory != nil && helperCommands.contains(where: arguments.contains) {
+            FileHandle.standardError.write(Data("--render-preview cannot be combined with helper commands.\n".utf8))
             exit(2)
         }
 
-        let service = SMAppService.daemon(plistName: RunAnywaysServiceIdentity.launchDaemonPlistName)
-        if let exitCode = HelperSetupCommandLine.runIfRequested(
-            arguments: arguments,
-            appURL: Bundle.main.bundleURL,
-            service: service
-        ) {
-            exit(exitCode)
+        if helperCommands.contains(where: arguments.contains) {
+            let service = SMAppService.daemon(plistName: RunAnywaysServiceIdentity.launchDaemonPlistName)
+            Task { @MainActor in
+                let exitCode = await HelperSetupCommandLine.runIfRequested(
+                    arguments: arguments,
+                    appURL: Bundle.main.bundleURL,
+                    service: service
+                ) ?? 0
+                exit(exitCode)
+            }
+            // Keep the executable's entrypoint synchronous so normal AppKit
+            // startup owns the main run loop. CLI modes pump it only while
+            // their asynchronous XPC or ServiceManagement request completes.
+            RunLoop.main.run()
+            exit(EXIT_FAILURE)
         }
 
         let application = NSApplication.shared

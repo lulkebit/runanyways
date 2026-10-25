@@ -1,6 +1,7 @@
 import Darwin
 import Dispatch
 import Foundation
+import os
 import RunAnywaysIPC
 
 private final class HelperService: NSObject, RunAnywaysHelperProtocol {
@@ -76,7 +77,9 @@ private final class ListenerDelegate: NSObject, NSXPCListenerDelegate {
 
 @main
 private enum RunAnywaysHelperMain {
+    private static let logger = Logger(subsystem: "com.runanyways.RunAnywaysHelper", category: "Lifecycle")
     static func main() {
+        logger.notice("Helper process entered main.")
         guard getuid() == 0 else {
             writeError("RunAnywaysHelper must run as root.\n")
             exit(EXIT_FAILURE)
@@ -139,6 +142,7 @@ private enum RunAnywaysHelperMain {
         }
 
         listener.resume()
+        logger.notice("Authenticated Mach service listener is ready.")
         // A named Mach-service listener returns from resume(). Keep the process,
         // delegate, timer, and signal sources alive for launchd requests.
         withExtendedLifetime((listener, delegate, timer, signalSources)) {
@@ -147,6 +151,7 @@ private enum RunAnywaysHelperMain {
     }
 
     private static func writeError(_ message: String) {
+        logger.error("\(message, privacy: .public)")
         FileHandle.standardError.write(Data(message.utf8))
     }
 }

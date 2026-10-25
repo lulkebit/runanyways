@@ -8,6 +8,8 @@
 	</array>
 	<key>BundleProgram</key>
 	<string>Contents/Library/HelperTools/RunAnywaysHelper</string>
+	<key>ExitTimeOut</key>
+	<integer>15</integer>
 	<key>KeepAlive</key>
 	<true/>
 	<key>Label</key>

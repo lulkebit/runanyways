@@ -13,7 +13,7 @@ struct RunAnywaysPopover: View {
             statusCard
                 .padding(.top, 14)
 
-            if !model.isPreview && !model.hasRegisteredHelper {
+            if !model.isPreview && !model.hasRegisteredHelper && !model.hasPendingCleanup {
                 helperSetup
                     .padding(.top, 12)
             } else {
@@ -66,6 +66,8 @@ struct RunAnywaysPopover: View {
                 StatusBadge(title: "Preview", color: .orange, symbol: "eye")
             } else if model.hasRestoreError {
                 StatusBadge(title: "Needs attention", color: .orange, symbol: "exclamationmark.triangle.fill")
+            } else if model.isConnectionUnavailable {
+                StatusBadge(title: "Unavailable", color: .orange, symbol: "wifi.slash")
             } else if model.hasVerifiedProtection {
                 StatusBadge(title: "Protected", color: .green, symbol: "checkmark.shield.fill")
             } else {
@@ -141,6 +143,26 @@ struct RunAnywaysPopover: View {
                 .controlSize(.regular)
                 .accessibilityHint("Ask the helper to retry restoring normal sleep.")
                 .disabled(!model.canStopSession)
+            } else if model.canRetryConnection {
+                VStack(spacing: 8) {
+                    Button(action: model.retryConnection) {
+                        Label("Retry connection", systemImage: "arrow.clockwise")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.regular)
+                    .disabled(model.isBusy)
+                    .accessibilityHint("Fetch the helper's current status without changing the sleep setting.")
+
+                    Button(action: model.repairHelper) {
+                        Label("Repair helper", systemImage: "wrench.and.screwdriver")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.regular)
+                    .disabled(!model.canRepairHelper)
+                    .accessibilityHint("Repair the installed helper using this build's configured installation method.")
+                }
             } else if sessionIsActive {
                 HStack(spacing: 8) {
                     Button(action: model.extendSession) {
@@ -228,6 +250,15 @@ struct RunAnywaysPopover: View {
                 .controlSize(.regular)
                 .disabled(!model.canRegisterHelper)
                 .accessibilityHint("Register the helper. macOS may ask you to approve it in System Settings.")
+            } else if model.isLocalDaemonBackend && model.canRepairHelper {
+                Button(action: model.repairHelper) {
+                    Label(model.localHelperActionTitle, systemImage: "wrench.and.screwdriver")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.regular)
+                .disabled(model.isBusy)
+                .accessibilityHint("Use the administrator-authorized local helper installer.")
             } else if !model.helperResourcesUnavailable {
                 Button(action: model.openApprovalSettings) {
                     Label("Review helper settings", systemImage: "gearshape")
@@ -355,6 +386,7 @@ struct RunAnywaysPopover: View {
 
     private var statusSymbol: String {
         if model.hasRestoreError { return "exclamationmark.triangle.fill" }
+        if model.isConnectionUnavailable { return "wifi.slash" }
         guard model.hasVerifiedProtection, let session = model.helperStatus?.session else {
             return model.isPreview ? "eye" : "moon.zzz"
         }
@@ -371,7 +403,7 @@ struct RunAnywaysPopover: View {
 
     private var statusColor: Color {
         if model.isPreview { return .orange }
-        if model.hasRestoreError || model.mainStatusTitle == "Protection not verified" { return .orange }
+        if model.hasRestoreError || model.isConnectionUnavailable || model.mainStatusTitle == "Protection not verified" { return .orange }
         return model.hasVerifiedProtection ? .green : .secondary
     }
 }
