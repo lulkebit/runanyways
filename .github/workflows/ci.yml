@@ -1,0 +1,33 @@
+name: macOS checks
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test-and-build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15-intel, macos-26]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Test session and helper logic without privileges
+        run: swift test
+      - name: Build local app bundle
+        run: ./scripts/build-app.sh --release
+      - name: Verify bundle signature
+        run: codesign --verify --deep --strict dist/RunAnyways.app
+      - name: Archive development build
+        run: ditto -c -k --sequesterRsrc --keepParent dist/RunAnyways.app dist/RunAnyways-development.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RunAnyways-development-${{ matrix.os }}
+          path: dist/RunAnyways-development.zip
+          retention-days: 7
