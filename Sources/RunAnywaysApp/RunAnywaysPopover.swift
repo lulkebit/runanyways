@@ -10,8 +10,10 @@ struct RunAnywaysPopover: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
-            statusCard
-                .padding(.top, 14)
+            if shouldShowStatusCard {
+                statusCard
+                    .padding(.top, 14)
+            }
 
             if !model.isPreview && !model.hasRegisteredHelper && !model.hasPendingCleanup {
                 helperSetup
@@ -125,6 +127,31 @@ struct RunAnywaysPopover: View {
         .overlay {
             RoundedRectangle(cornerRadius: 13)
                 .strokeBorder(statusColor.opacity(0.12), lineWidth: 1)
+        }
+    }
+
+    private var shouldShowStatusCard: Bool {
+        guard !model.isPreview else { return false }
+        if model.isConnectionUnavailable || model.hasRestoreError || model.hasPendingCleanup ||
+            model.helperResourcesUnavailable || model.needsHelperApproval ||
+            model.helperSetupAllowsRegistration || !model.hasRegisteredHelper {
+            return true
+        }
+        guard let session = model.helperStatus?.session else { return true }
+        if session.isActive { return true }
+
+        switch session.state {
+        case .idle:
+            return false
+        case .ended:
+            switch session.endReason {
+            case .lowBattery, .thermalPressure:
+                return true
+            case .stopped, .expired, .none:
+                return false
+            }
+        case .failed, .armed, .running, .paused:
+            return true
         }
     }
 
